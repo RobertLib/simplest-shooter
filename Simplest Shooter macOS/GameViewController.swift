@@ -14,7 +14,7 @@ class GameViewController: NSViewController {
     override func viewDidLoad() {
         super.viewDidLoad()
         
-        let scene = GameScene.newGameScene()
+        let scene = OpeningScene.newOpeningScene()
         
         // Present the scene
         let skView = self.view as! SKView
@@ -22,8 +22,10 @@ class GameViewController: NSViewController {
         
         skView.ignoresSiblingOrder = true
         
+        #if DEBUG
         skView.showsFPS = true
         skView.showsNodeCount = true
+        #endif
     }
 
 }

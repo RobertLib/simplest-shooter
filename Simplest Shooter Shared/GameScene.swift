@@ -7,61 +7,228 @@
 
 import SpriteKit
 
-class GameScene: SKScene {
-    
-    
-    fileprivate var label : SKLabelNode?
-    fileprivate var spinnyNode : SKShapeNode?
+#if os(OSX)
+import Carbon.HIToolbox
+#endif
 
-    
+class GameScene: SKScene, SKPhysicsContactDelegate {
+    let OVERHEAT_THRESHOLD: CGFloat = 6.5
+
+    fileprivate var player: Player?
+    fileprivate var scoreLabel: SKLabelNode?
+    fileprivate var livesLabel: SKLabelNode?
+    fileprivate var levelLabel: SKLabelNode?
+
+    private var backgroundMusic: SKAudioNode!
+    private var lastUpdate: TimeInterval!
+
+    var dt: TimeInterval = 0
+
+    var readyLabel: SKLabelNode?
+    var overheatingBar: SKShapeNode?
+    var overheatingBarStartPos: CGPoint = .zero
+    var overheatValue: CGFloat = .zero
+
+    var leftPressed = false
+    var rightPressed = false
+    var upPressed = false
+    var downPressed = false
+    var actionPressed = false
+
+    var isTransitionToNextLevel = false
+
     class func newGameScene() -> GameScene {
         // Load 'GameScene.sks' as an SKScene.
         guard let scene = SKScene(fileNamed: "GameScene") as? GameScene else {
             print("Failed to load GameScene.sks")
             abort()
         }
-        
+
         // Set the scale mode to scale to fit the window
-        scene.scaleMode = .aspectFill
-        
+        scene.scaleMode = .aspectFit
+
         return scene
     }
-    
-    func setUpScene() {
-        // Get label node from scene and store it for use later
-        self.label = self.childNode(withName: "//helloLabel") as? SKLabelNode
-        if let label = self.label {
-            label.alpha = 0.0
-            label.run(SKAction.fadeIn(withDuration: 2.0))
-        }
-        
-        // Create shape node to use during mouse interaction
-        let w = (self.size.width + self.size.height) * 0.05
-        self.spinnyNode = SKShapeNode.init(rectOf: CGSize.init(width: w, height: w), cornerRadius: w * 0.3)
-        
-        if let spinnyNode = self.spinnyNode {
-            spinnyNode.lineWidth = 4.0
-            spinnyNode.run(SKAction.repeatForever(SKAction.rotate(byAngle: CGFloat(Double.pi), duration: 1)))
-            spinnyNode.run(SKAction.sequence([SKAction.wait(forDuration: 0.5),
-                                              SKAction.fadeOut(withDuration: 0.5),
-                                              SKAction.removeFromParent()]))
-        }
-    }
-    
-    override func didMove(to view: SKView) {
-        self.setUpScene()
+
+    private func goToSummaryScene() {
+        let summaryScene = SummaryScene.newSummaryScene()
+        let transition = SKTransition.fade(with: .black, duration: 1)
+
+        view?.presentScene(summaryScene, transition: transition)
     }
 
-    func makeSpinny(at pos: CGPoint, color: SKColor) {
-        if let spinny = self.spinnyNode?.copy() as! SKShapeNode? {
-            spinny.position = pos
-            spinny.strokeColor = color
-            self.addChild(spinny)
+    private func overheatingBarUpdate() {
+        overheatingBar?.xScale = lerp(
+            overheatingBar?.xScale ?? 0,
+            overheatValue,
+            dt
+        )
+
+        let red = lerp(
+            overheatingBar?.fillColor.sRGBAComponents.red ?? 0,
+            overheatValue / OVERHEAT_THRESHOLD,
+            dt
+        )
+
+        let alpha = lerp(
+            overheatingBar?.fillColor.sRGBAComponents.alpha ?? 0,
+            overheatValue / OVERHEAT_THRESHOLD,
+            dt
+        )
+
+        overheatingBar?.fillColor = SKColor(
+            red: red,
+            green: 0.4,
+            blue: 0.4,
+            alpha: alpha
+        )
+
+        if overheatValue > OVERHEAT_THRESHOLD {
+            overheatValue = OVERHEAT_THRESHOLD
+
+            player?.takeDamage()
+        }
+
+        if overheatValue > 0 {
+            overheatValue -= dt
         }
     }
-    
+
+    func addOverheatingValue(_ value: CGFloat) {
+        if overheatValue < OVERHEAT_THRESHOLD {
+            overheatValue += dt * value
+        }
+    }
+
+    func addScore(_ value: Int) {
+        score += value
+
+        scoreLabel?.text = "SCORE: \(score)"
+    }
+
+    func shakeWithOverheatingBar() {
+        overheatingBar?.run(
+            .move(
+                to: CGPoint(
+                    x: overheatingBarStartPos.x +
+                        CGFloat.random(in: -overheatValue...overheatValue),
+                    y: overheatingBarStartPos.y +
+                        CGFloat.random(in: -overheatValue...overheatValue)
+                ),
+                duration: 0.1
+            )
+        )
+    }
+
+    func takeLife() {
+        if lives > 1 {
+            lives -= 1
+
+            livesLabel?.text = "LIVES: \(lives)"
+        } else {
+            goToSummaryScene()
+        }
+    }
+
+    func transitionToNextLevel() -> SKAction {
+        self.isTransitionToNextLevel = true
+
+        let showLabel = SKAction.run {
+            level += 1
+
+            self.levelLabel?.text = "LEVEL \(level)"
+            self.levelLabel?.run(.fadeIn(withDuration: 0.2))
+        }
+
+        let hideLabel = SKAction.run {
+            self.levelLabel?.run(.fadeOut(withDuration: 0.2)) {
+                self.isTransitionToNextLevel = false
+            }
+        }
+
+        return .sequence([
+            showLabel,
+            .wait(forDuration: 3),
+            hideLabel
+        ])
+    }
+
+    func setUpScene() {
+        player = childNode(withName: "//Player") as? Player
+        scoreLabel = childNode(withName: "//Score") as? SKLabelNode
+        livesLabel = childNode(withName: "//Lives") as? SKLabelNode
+        levelLabel = childNode(withName: "//Level") as? SKLabelNode
+        readyLabel = childNode(withName: "//Ready") as? SKLabelNode
+        overheatingBar = childNode(withName: "//Overheating") as? SKShapeNode
+
+        score = 0
+        lives = initLifeCount
+        level = 0
+        shotsFired = 0
+
+        overheatingBar?.xScale = 0
+        overheatingBarStartPos = overheatingBar?.position ?? .zero
+
+        run(wavesOfEnemies(self)) {
+            self.goToSummaryScene()
+        }
+
+        if let musicURL = Bundle.main.url(forResource: "GameSceneMusic", withExtension: "mp3") {
+            backgroundMusic = SKAudioNode(url: musicURL)
+            addChild(backgroundMusic)
+        }
+    }
+
+    override func didMove(to view: SKView) {
+        physicsWorld.contactDelegate = self
+
+#if os(iOS)
+//        motionManager.startAccelerometerUpdates()
+#endif
+
+        setUpScene()
+    }
+
     override func update(_ currentTime: TimeInterval) {
         // Called before each frame is rendered
+
+        defer { lastUpdate = currentTime }
+
+        guard lastUpdate != nil else {
+            return
+        }
+
+        dt = currentTime - lastUpdate
+
+        guard dt < 1 else {
+            return
+        }
+
+        overheatingBarUpdate()
+
+        player?.update()
+    }
+
+    func didBegin(_ contact: SKPhysicsContact) {
+        if let nodeA = contact.bodyA.node {
+            if nodeA is Entity {
+                if (nodeA as? Entity)?.isActive == false {
+                    return
+                }
+
+                (nodeA as? Entity)?.onCollision(contact.bodyB.node)
+            }
+        }
+
+        if let nodeB = contact.bodyB.node {
+            if nodeB is Entity {
+                if (nodeB as? Entity)?.isActive == false {
+                    return
+                }
+
+                (nodeB as? Entity)?.onCollision(contact.bodyA.node)
+            }
+        }
     }
 }
 
@@ -70,34 +237,55 @@ class GameScene: SKScene {
 extension GameScene {
 
     override func touchesBegan(_ touches: Set<UITouch>, with event: UIEvent?) {
-        if let label = self.label {
-            label.run(SKAction.init(named: "Pulse")!, withKey: "fadeInOut")
+        if player?.isActive == true {
+            player?.isShooting = true
         }
-        
+
         for t in touches {
-            self.makeSpinny(at: t.location(in: self), color: SKColor.green)
+            let location = t.location(in: self)
+
+            let nodeNames = nodes(at: location).map { node in
+                node.name
+            }
+
+            if nodeNames.contains("Player") && location.y < 0 && player?.isActive == true {
+                player?.inTouch = true
+
+                player?.run(.group([
+                    .scale(to: 1.1, duration: 0.5),
+                    .move(to: location, duration: 0.2)
+                ]))
+            }
         }
     }
-    
+
     override func touchesMoved(_ touches: Set<UITouch>, with event: UIEvent?) {
         for t in touches {
-            self.makeSpinny(at: t.location(in: self), color: SKColor.blue)
+            let location = t.location(in: self)
+
+            if location.y < 0 && player?.isActive == true && player?.inTouch == true {
+                player?.run(.move(to: location, duration: 0.1))
+            }
         }
     }
-    
+
     override func touchesEnded(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for t in touches {
-            self.makeSpinny(at: t.location(in: self), color: SKColor.red)
+        player?.isShooting = false
+        player?.inTouch = false
+
+        if player?.isActive == true {
+            player?.run(.group([
+                .scale(to: 1, duration: 0.5),
+                .move(to: player?.startPos ?? CGPointZero, duration: 0.2)
+            ]))
         }
     }
-    
+
     override func touchesCancelled(_ touches: Set<UITouch>, with event: UIEvent?) {
-        for t in touches {
-            self.makeSpinny(at: t.location(in: self), color: SKColor.red)
-        }
+
     }
-    
-   
+
+
 }
 #endif
 
@@ -106,18 +294,49 @@ extension GameScene {
 extension GameScene {
 
     override func mouseDown(with event: NSEvent) {
-        if let label = self.label {
-            label.run(SKAction.init(named: "Pulse")!, withKey: "fadeInOut")
-        }
-        self.makeSpinny(at: event.location(in: self), color: SKColor.green)
+
     }
-    
+
     override func mouseDragged(with event: NSEvent) {
-        self.makeSpinny(at: event.location(in: self), color: SKColor.blue)
+
     }
-    
+
     override func mouseUp(with event: NSEvent) {
-        self.makeSpinny(at: event.location(in: self), color: SKColor.red)
+
+    }
+
+    override func keyDown(with event: NSEvent) {
+        switch Int(event.keyCode) {
+        case kVK_LeftArrow:
+            leftPressed = true
+        case kVK_RightArrow:
+            rightPressed = true
+        case kVK_UpArrow:
+            upPressed = true
+        case kVK_DownArrow:
+            downPressed = true
+        case kVK_Space:
+            actionPressed = true
+        default:
+            break
+        }
+    }
+
+    override func keyUp(with event: NSEvent) {
+        switch Int(event.keyCode) {
+        case kVK_LeftArrow:
+            leftPressed = false
+        case kVK_RightArrow:
+            rightPressed = false
+        case kVK_UpArrow:
+            upPressed = false
+        case kVK_DownArrow:
+            downPressed = false
+        case kVK_Space:
+            actionPressed = false
+        default:
+            break
+        }
     }
 
 }
